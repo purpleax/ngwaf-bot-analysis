@@ -1,0 +1,11 @@
+{
+  "main": "build/app.cjs",
+  "output": "build/sea-prep.blob",
+  "disableExperimentalSEAWarning": true,
+  "assets": {
+    "index.html": "public/index.html",
+    "app.js": "public/app.js",
+    "styles.css": "public/styles.css",
+    "chart.umd.min.js": "public/chart.umd.min.js"
+  }
+}

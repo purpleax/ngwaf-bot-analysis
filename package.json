@@ -1,0 +1,17 @@
+{
+  "name": "ngwaf-bot-analysis",
+  "version": "2.0.0",
+  "description": "Web dashboard for Fastly Next-Gen WAF bot visibility & traffic analysis, backed by the Fastly unified API",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build:mac": "bash scripts/build-sea.sh"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
