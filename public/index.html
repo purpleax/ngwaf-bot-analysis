@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NGWAF Bot Analysis</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23ff282d'/><text x='16' y='24' font-size='22' font-weight='bold' text-anchor='middle' fill='white' font-family='Arial,sans-serif'>f</text></svg>" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- Print-only report cover (page 1 of the PDF); populated by app.js at print time. -->
+    <div id="reportCover" class="report-cover" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="fastly-word">fastly</span>
+        <div>
+          <h1>Bot Analysis</h1>
+          <p class="sub" id="corpLabel">Fastly Next-Gen WAF · bot visibility &amp; traffic analysis</p>
+        </div>
+      </div>
+      <div class="controls">
+        <label class="ctl"><span>Customer ID</span>
+          <input id="customerInput" type="text" placeholder="customer id" spellcheck="false" autocomplete="off" />
+        </label>
+        <button id="loadBtn" class="btn" title="Discover workspaces for this customer">Load</button>
+        <span id="customerName" class="cust-name" hidden title="Resolved customer name"></span>
+        <label class="ctl"><span>Workspace</span><select id="siteSelect"></select></label>
+        <label class="ctl"><span>Reporting period</span>
+          <select id="windowSelect">
+            <option value="24h">Last 24h</option>
+            <option value="7d" selected>Last 7 days</option>
+            <option value="14d">Last 14 days</option>
+          </select>
+        </label>
+        <button id="refreshBtn" class="btn" title="Refresh">↻</button>
+        <button id="printBtn" class="btn" title="Print / save the dashboard as a PDF">🖨 PDF</button>
+      </div>
+    </header>
+
+    <div id="statusLine" class="status"></div>
+
+    <section class="kpis" id="kpis"></section>
+
+    <div class="dash" id="dash"></div>
+
+    <footer class="foot">
+      <div>Bot data via the Fastly unified API (request-level signals) · read-only ·
+      counts are exact where shown, per-bot figures scaled from samples</div>
+      <div id="buildStamp" class="build-stamp"></div>
+    </footer>
+
+    <!-- Print-only running footer, repeated on every PDF page. -->
+    <div id="printFoot" class="print-foot" aria-hidden="true">
+      <span>Fastly Next-Gen WAF · Bot Traffic Analysis</span>
+      <span>Confidential — prepared for the named customer</span>
+    </div>
+
+    <script src="chart.umd.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
