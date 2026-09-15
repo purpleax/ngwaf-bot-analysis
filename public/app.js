@@ -35,7 +35,7 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const ALL = '__all__';
 
-  const state = { customerId: null, customerName: null, workspace: null, window: '7d', bots: null, overview: null, workspaceNames: {}, workspaceModes: {}, botFilter: 'all', catFilter: 'all', trendView: 'class', reqSeq: 0 };
+  const state = { customerId: null, customerName: null, workspace: null, window: '7d', bots: null, overview: null, workspaceNames: {}, workspaceModes: {}, botFilter: 'all', catFilter: 'all', trendView: 'class', exclude: [], reqSeq: 0 };
   const charts = [];
   const wsLabel = (id) => (id && id !== ALL ? state.workspaceNames[id] || id : 'All workspaces');
   const winLabel = (w) => (w === '24h' ? 'last 24h' : w === '14d' ? 'last 14 days' : 'last 7 days');
@@ -49,7 +49,9 @@
   async function getJSON(u) { const r = await fetch(u); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); return r.json(); }
   const cq = () => (state.customerId ? `customer_id=${encodeURIComponent(state.customerId)}&` : '');
   const loadWorkspaces = (customerId) => getJSON(`/api/workspaces${customerId ? `?customer_id=${encodeURIComponent(customerId)}` : ''}`);
-  const loadBots = () => getJSON(`/api/bots?${cq()}workspace=${encodeURIComponent(state.workspace)}&window=${state.window}`);
+  // Reasons go out as a repeated param — the values contain commas and colons.
+  const excludeQS = () => state.exclude.map((r) => `&exclude=${encodeURIComponent(r)}`).join('');
+  const loadBots = () => getJSON(`/api/bots?${cq()}workspace=${encodeURIComponent(state.workspace)}&window=${state.window}${excludeQS()}`);
   const loadOverview = () => getJSON(`/api/overview?${cq()}workspace=${encodeURIComponent(state.workspace)}&window=${state.window}`);
   const setStatus = (m, e) => { const s = $('#statusLine'); s.textContent = m || ''; s.className = 'status' + (e ? ' error' : ''); };
 
@@ -620,6 +622,8 @@
       ['Reporting period', winLabel(state.window).replace(/^last/, 'Last'), false],
       ['Generated', when, false],
     ];
+    // A filtered report must say so on its face, or the numbers can't be trusted.
+    if (state.exclude.length) meta.push(['Excluded', state.exclude.join(', '), false]);
     let summary = 'Bot traffic analysis for the selected Fastly Next-Gen WAF property.';
     if (t) {
       const a = state.bots.ai;
@@ -627,6 +631,10 @@
         + `across verified, suspected and bad-bot categories, from ${fmt(t.totalRequests)} requests inspected by the Next-Gen WAF. `
         + `This includes <b>${fmt(a.total)} AI bot &amp; crawler hits</b> and <b>${fmt(t.badBots)} malicious, scanner or impostor requests</b>, `
         + `of which ${fmt(t.botsBlocked)} were blocked.`;
+      if (state.exclude.length) {
+        summary += ` Suspected-bot figures exclude the detection reason${state.exclude.length > 1 ? 's' : ''} `
+          + `${state.exclude.map((r) => `<b>${esc(r)}</b>`).join(', ')}, removed from every figure in this report.`;
+      }
     }
     const stats = kpiItems().map(([l, v]) => `<div class="rc-stat"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
     el.innerHTML = `
@@ -646,7 +654,70 @@
       </div>`;
   }
 
+  // ---- suspected-bot exclusions -------------------------------------------
+  // A single noisy detection reason ("Missing header(s)") can dominate the
+  // suspected-bot category and skew the whole report. Excluding one re-requests
+  // the payload with ?exclude= — the server subtracts that reason's *exact*
+  // count, so headline numbers stay exact rather than becoming estimates.
+  const LS_EXCLUDE = 'ngwaf.excludeReasons';
+
+  function renderExcludeMenu() {
+    const panel = $('#excludePanel'); const sum = $('#excludeSummary');
+    if (!panel || !sum) return;
+    const reasons = state.bots?.suspected?.reasons || [];
+    const n = state.exclude.length;
+    sum.textContent = n ? `Exclusions · ${n}` : 'Exclusions';
+    sum.classList.toggle('active', n > 0);
+
+    if (!reasons.length) {
+      panel.innerHTML = '<div class="menu-empty">No suspected-bot detection reasons in this window.</div>';
+      return;
+    }
+    const rows = reasons.map((r) => {
+      const on = state.exclude.includes(r.reason);
+      // Values the API cannot filter on (bot names rather than detection
+      // reasons) are shown for context but never offered as excludable.
+      const dis = r.filterable ? '' : 'disabled';
+      const note = r.filterable ? '' : '<span class="menu-note" title="The NGWAF requests API does not honour a signal filter for this value">not filterable</span>';
+      return `<label class="menu-row ${dis ? 'is-disabled' : ''}">
+          <input type="checkbox" data-reason="${esc(r.reason)}" ${on ? 'checked' : ''} ${dis} />
+          <span class="menu-label">${esc(r.reason)}</span>
+          ${note}<span class="menu-count">${fmt(r.total)}</span>
+        </label>`;
+    }).join('');
+    panel.innerHTML = `<div class="menu-head">Exclude suspected-bot reasons</div>${rows}
+      <div class="menu-foot">
+        <button class="btn small" id="excludeClear" ${n ? '' : 'disabled'}>Clear all</button>
+        <span class="menu-hint">Applies to every chart, table and the PDF.</span>
+      </div>`;
+
+    panel.querySelectorAll('input[data-reason]').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const r = cb.getAttribute('data-reason');
+        state.exclude = cb.checked ? [...new Set([...state.exclude, r])] : state.exclude.filter((x) => x !== r);
+        persistExclusions(); resetFilters(); refresh();
+      });
+    });
+    $('#excludeClear')?.addEventListener('click', () => {
+      state.exclude = []; persistExclusions(); resetFilters(); refresh();
+    });
+  }
+
+  function persistExclusions() {
+    try { localStorage.setItem(LS_EXCLUDE, JSON.stringify(state.exclude)); } catch { /* ignore */ }
+  }
+  function restoreExclusions() {
+    try { const v = JSON.parse(localStorage.getItem(LS_EXCLUDE) || '[]'); if (Array.isArray(v)) state.exclude = v.filter((x) => typeof x === 'string'); } catch { /* ignore */ }
+  }
+
+  // Short human phrase for the status line, banner and PDF cover.
+  const excludeLabel = () => (state.exclude.length ? `excluding ${state.exclude.map((r) => `“${r}”`).join(', ')}` : '');
+
   // ---- orchestration ------------------------------------------------------
+  // Reset the Top-bots filters when the data set changes, so they never
+  // "stick" from a previous taxonomy-row click.
+  const resetFilters = () => { state.botFilter = 'all'; state.catFilter = 'all'; };
+
   async function refresh() {
     const seq = (state.reqSeq += 1);
     const stale = () => seq !== state.reqSeq;
@@ -657,12 +728,17 @@
     try { bots = await loadBots(); } catch (e) { if (!stale()) setStatus(e.message, true); return; }
     if (stale()) return;
     state.bots = bots;
-    renderKPIs(); renderDash();
+    // Drop any persisted reason the current window/workspace cannot filter on,
+    // so a stale localStorage entry can't silently claim to be filtering.
+    const usable = new Set((bots.suspected?.reasons || []).filter((r) => r.filterable).map((r) => r.reason));
+    if (state.exclude.some((r) => !usable.has(r))) { state.exclude = state.exclude.filter((r) => usable.has(r)); persistExclusions(); }
+    renderKPIs(); renderDash(); renderExcludeMenu();
     setStatus(`Loaded · ${wsLabel(state.workspace)} · ${winLabel(state.window)}${bots.errors?.length ? ` · ${bots.errors.length} source(s) degraded` : ''} · adding threat context…`);
     // Threat context is secondary; fold it in when ready.
     try { const ov = await loadOverview(); if (!stale()) { state.overview = ov; renderDash(); } } catch { /* ignore */ }
     if (stale()) return;
-    setStatus(`Updated ${new Date().toLocaleTimeString()} · ${wsLabel(state.workspace)} · ${winLabel(state.window)}${bots.errors?.length ? ` · ${bots.errors.length} source(s) degraded` : ''}`);
+    const ex = excludeLabel();
+    setStatus(`Updated ${new Date().toLocaleTimeString()} · ${wsLabel(state.workspace)} · ${winLabel(state.window)}${ex ? ` · ${ex}` : ''}${bots.errors?.length ? ` · ${bots.errors.length} source(s) degraded` : ''}`);
   }
 
   const LS_KEY = 'ngwaf.customerId';
@@ -706,9 +782,6 @@
   }
 
   async function init() {
-    // Reset the Top-bots filters when the data set changes, so they never
-    // "stick" from a previous taxonomy-row click.
-    const resetFilters = () => { state.botFilter = 'all'; state.catFilter = 'all'; };
     $('#windowSelect').addEventListener('change', (e) => { state.window = e.target.value; resetFilters(); refresh(); });
     $('#siteSelect').addEventListener('change', (e) => { state.workspace = e.target.value; resetFilters(); refresh(); });
     $('#refreshBtn').addEventListener('click', refresh);
@@ -733,6 +806,8 @@
     // binary's build date) so a stale packaged build is obvious at a glance.
     getJSON('/api/health').then((h) => { const el = $('#buildStamp'); if (el && h.build) el.textContent = h.build === 'dev' ? 'dev build' : h.build; }).catch(() => {});
     setStatus('Connecting to Fastly…');
+    restoreExclusions();
+    renderExcludeMenu();
     let persisted = null; try { persisted = localStorage.getItem(LS_KEY); } catch { /* ignore */ }
     await discover(persisted || null);
   }

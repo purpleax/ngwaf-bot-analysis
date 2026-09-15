@@ -33,6 +33,12 @@
             <option value="14d">Last 14 days</option>
           </select>
         </label>
+        <!-- Exclude noisy suspected-bot detection reasons from the whole report.
+             Populated from the loaded payload, so it is empty until first load. -->
+        <details id="excludeMenu" class="ctl exclude-ctl">
+          <summary id="excludeSummary" class="btn" title="Exclude suspected-bot detection reasons from this report">Exclusions</summary>
+          <div class="menu-panel" id="excludePanel"></div>
+        </details>
         <button id="refreshBtn" class="btn" title="Refresh">↻</button>
         <button id="printBtn" class="btn" title="Print / save the dashboard as a PDF">🖨 PDF</button>
       </div>

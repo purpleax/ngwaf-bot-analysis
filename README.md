@@ -74,6 +74,19 @@ A **customer-ID field**, a workspace selector, and a reporting-period selector
   reloads.
 - **Per-workspace** — pick a single workspace (e.g. Edge Demo / Publishing / eCommerce).
 - **All workspaces** — a customer-wide aggregate merging every workspace.
+- **Exclusions** — leave a noisy suspected-bot *detection reason* out of the whole
+  report. NGWAF records why a request was called a suspected bot in the
+  `SUSPECTED-BOT` signal's value — `Missing header(s)`, `User-Agent: Crawler`,
+  `User-Agent: Common Automation` — and a single false-positive-prone reason can
+  dominate the category and skew every bot figure. Ticking one removes it from
+  every KPI, chart, table and the PDF, using that reason's **exact** volume rather
+  than a sampled estimate. The PDF cover states what was excluded, so a filtered
+  report always says so on its face. The choice is remembered across reloads.
+
+  Reasons the API cannot filter on (AI bot names such as `ClaudeBot`, which appear
+  in the same field) are listed for context but marked *not filterable* and can
+  never be excluded — see the note in `CLAUDE.md`, the API silently ignores an
+  unsupported filter rather than failing, so this is verified before it is offered.
 
 ## How it works
 
@@ -98,7 +111,8 @@ using its inline tag/time query syntax, and threat context from `/events`.
 The frontend calls `/api/workspaces` to discover workspaces, then `/api/bots` (the
 primary data) and secondarily `/api/overview` (threat context) in parallel; bot
 panels render as soon as bot data lands. The data endpoints accept
-`?customer_id=<id>&workspace=<id|__all__>&window=<24h|7d|14d>`. Windows longer
+`?customer_id=<id>&workspace=<id|__all__>&window=<24h|7d|14d>`, plus a repeated
+`&exclude=<reason>` for the suspected-bot exclusions above. Windows longer
 than 7 days are chunked into ≤7-day queries (the requests API caps each search at
 7 days).
 

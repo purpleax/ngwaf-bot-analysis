@@ -152,6 +152,17 @@ function verifiedSubtypeOf(req) {
   }
   return 'Other verified';
 }
+// Suspected-bot requests carry the *detection reason* in the SUSPECTED-BOT signal
+// value — "Missing header(s)", "User-Agent: Crawler", "User-Agent: Common
+// Automation" — emitted by the system BotDetectRule detector. AI bots tagged
+// SUSPECTED-BOT instead carry their bot name there ("ClaudeBot"). A single noisy
+// reason can dominate the whole category, so the sample is partitioned by reason
+// and the caller can exclude one without losing the rest.
+const SUSPECTED_REASON_UNKNOWN = 'Unattributed';
+function suspectedReasonOf(req) {
+  return tagValue(req, 'SUSPECTED-BOT') || SUSPECTED_REASON_UNKNOWN;
+}
+
 function dayKey(ts) { return new Date(ts).toISOString().slice(0, 10); }
 
 // --- raw aggregate (mergeable) -------------------------------------------
@@ -168,6 +179,11 @@ function emptyBotRaw() {
     headless: 0,
     geoByCat: new Map(), // verdict catKey -> Map(country -> sampleCount)
     hostsByCat: new Map(), // verdict catKey -> Map(host -> sampleCount)
+    // Suspected bots are stored partitioned by detection reason and materialised
+    // into the flat shapes at format time, so an excluded reason can be dropped
+    // without re-fetching. See suspectedReasonOf() and materialiseSuspected().
+    suspectedParts: new Map(), // reason -> {sampled, blocked, bots, geo, hosts, buckets}
+    suspectedReasons: new Map(), // reason -> {total (exact), filterable}
     nBuckets: 0,
     bucketLabels: [], // per time bucket
     bucketTotal: [], // exact total requests per bucket
@@ -253,11 +269,41 @@ function accumulateGeoHost(raw, catKey, req) {
   }
 }
 
+function suspectedPart(raw, reason) {
+  let p = raw.suspectedParts.get(reason);
+  if (!p) {
+    p = { sampled: 0, blocked: 0, bots: new Map(), geo: new Map(), hosts: new Map(), buckets: new Array(raw.nBuckets).fill(0) };
+    raw.suspectedParts.set(reason, p);
+  }
+  return p;
+}
+
+// Every sampled SUSPECTED-BOT request lands in exactly one reason partition —
+// including the AI-tagged ones, which are kept out of the bot list here (the AI
+// jobs own them) but still carry the category's geo/host distribution.
+function ingestSuspected(raw, req, workspace, bk) {
+  const p = suspectedPart(raw, suspectedReasonOf(req));
+  const blocked = requestBlocked(req);
+  p.sampled += 1;
+  if (blocked) p.blocked += 1;
+  if (req.remoteCountryCode) p.geo.set(req.remoteCountryCode, (p.geo.get(req.remoteCountryCode) || 0) + 1);
+  if (req.serverHostname) p.hosts.set(req.serverHostname, (p.hosts.get(req.serverHostname) || 0) + 1);
+  if (hasTag(req, 'SUSPECTED-BOT.AI-CRAWLER') || hasTag(req, 'SUSPECTED-BOT.AI-FETCHER')) return;
+  const ua = req.userAgent || '';
+  const name = matchUA(ua, TOOL_BOTS) || matchUA(ua, SEARCH_BOTS) || 'Suspected bot';
+  let b = p.bots.get(name);
+  if (!b) { b = newBotAgg(name, 'suspected'); p.bots.set(name, b); }
+  b._workspace = workspace;
+  recordCommon(b, req, blocked);
+  if (req.timestamp) { const i = bucketIndex(bk, Date.parse(req.timestamp)); if (i >= 0) p.buckets[i] += 1; }
+}
+
 function ingestOther(raw, cat, req, workspace) {
   const ua = req.userAgent || '';
   if (isHeadless(req)) raw.headless += 1;
-  // Verdict categories drive the geo/host/traffic distribution.
-  if (cat.verdict) accumulateGeoHost(raw, cat.key, req);
+  // Verdict categories drive the geo/host/traffic distribution. 'suspected' keeps
+  // its own per-reason geo/host maps instead, merged in materialiseSuspected().
+  if (cat.verdict && cat.ingest !== 'suspected') accumulateGeoHost(raw, cat.key, req);
 
   if (cat.ingest === 'verified') {
     const subtype = verifiedSubtypeOf(req);
@@ -272,11 +318,8 @@ function ingestOther(raw, cat, req, workspace) {
     ingestBot(raw, 'scanner', matchUA(ua, TOOL_BOTS) || tagValue(req, 'VERIFIED-BOT') || tagValue(req, 'SCANNER') || 'Scanner', req, workspace);
   } else if (cat.ingest === 'impostor') {
     ingestBot(raw, 'impostor', `Fake ${matchUA(ua, SEARCH_BOTS) || matchUA(ua, AI_BOTS) || 'bot'}`, req, workspace);
-  } else if (cat.ingest === 'suspected') {
-    if (!hasTag(req, 'SUSPECTED-BOT.AI-CRAWLER') && !hasTag(req, 'SUSPECTED-BOT.AI-FETCHER')) {
-      ingestBot(raw, 'suspected', matchUA(ua, TOOL_BOTS) || matchUA(ua, SEARCH_BOTS) || 'Suspected bot', req, workspace);
-    }
   }
+  // 'suspected' is handled by ingestSuspected() — it partitions by detection reason.
 }
 
 // Split the window into <=8 time buckets; return {edges(ms), labels}.
@@ -366,8 +409,10 @@ async function fetchWorkspaceBots({ workspace, customerId, hours, nowMs }) {
     raw.cat[j.key] = { total, sampled: data.length, blocked };
     if (j.type === 'ai') {
       for (const req of data) { ingestAI(raw, j, req, workspace); bumpBucket(req, 'ai'); }
+    } else if (j.ingest === 'suspected') {
+      for (const req of data) { ingestOther(raw, j, req, workspace); ingestSuspected(raw, req, workspace, bk); }
     } else if (j.ingest) {
-      const kind = j.ingest === 'verified' ? 'verified' : j.ingest === 'suspected' ? 'suspected' : 'bad';
+      const kind = j.ingest === 'verified' ? 'verified' : 'bad';
       for (const req of data) {
         ingestOther(raw, j, req, workspace);
         // AI requests are counted by the AI jobs; don't double-count them here.
@@ -377,7 +422,47 @@ async function fetchWorkspaceBots({ workspace, customerId, hours, nowMs }) {
       }
     }
   });
+
+  await countSuspectedReasons(raw, { customerId, workspace, hours });
   return raw;
+}
+
+// Exact volume per detection reason, so excluding one can subtract a real count
+// rather than a sampled estimate.
+//
+// TRAP: `signal:"<value>"` is honoured only for the BotDetectRule reason strings.
+// For any other value — a bot name like "ClaudeBot", or a typo — the filter is
+// SILENTLY IGNORED and the query returns the entire parent set rather than zero
+// or an error. `-signal:"<value>"` negation is likewise silently dropped and
+// returns the positive result, so exclusion subtracts a positive count and never
+// negates.
+//
+// Whether the filter was honoured is therefore verified by CONTENT, not by count:
+// the probe reads back a sample and every returned row must actually carry the
+// reason. A count-only check ("smaller than the parent total") would be a
+// heuristic, and on a category dominated by one reason it could pass by luck —
+// the totals also drift under live traffic, since parent and reason are measured
+// seconds apart. A reason that fails the check is reported filterable:false and
+// can never be excluded, so an unverified filter can never move a number.
+const REASON_PROBE = 25;
+async function countSuspectedReasons(raw, { customerId, workspace, hours }) {
+  const reasons = [...raw.suspectedParts.keys()].filter((r) => r && r !== SUSPECTED_REASON_UNKNOWN);
+  await mapPool(reasons, 5, async (reason) => {
+    if (reason.includes('"')) { raw.suspectedReasons.set(reason, { total: 0, filterable: false }); return; }
+    try {
+      let total = 0; let honoured = true; let seen = 0;
+      for (const c of windowChunks(hours)) {
+        const q = `from:-${c.from}h${c.until > 0 ? ` until:-${c.until}h` : ''} tag:SUSPECTED-BOT signal:"${reason}"`;
+        const r = await searchRequests(customerId, workspace, q, REASON_PROBE);
+        total += r?.totalCount ?? 0;
+        for (const req of r?.data || []) { seen += 1; if (suspectedReasonOf(req) !== reason) honoured = false; }
+      }
+      raw.suspectedReasons.set(reason, { total, filterable: honoured && seen > 0 && total > 0 });
+    } catch (err) {
+      raw.errors.push(`${workspace || 'workspace'}/reason ${reason}: ${String(err.message || err)}`);
+      raw.suspectedReasons.set(reason, { total: 0, filterable: false });
+    }
+  });
 }
 
 async function mapPool(items, size, fn) {
@@ -433,6 +518,26 @@ function mergeBotRaw(list) {
       if (!t) { t = newBotAgg(b.name, b.catKey); out.bots.set(key, t); }
       if (b.subtype && !t.subtype) t.subtype = b.subtype;
       mergeAgg(t, b);
+    }
+    for (const [reason, sp] of r.suspectedParts) {
+      let t = out.suspectedParts.get(reason);
+      if (!t) { t = { sampled: 0, blocked: 0, bots: new Map(), geo: new Map(), hosts: new Map(), buckets: [] }; out.suspectedParts.set(reason, t); }
+      t.sampled += sp.sampled; t.blocked += sp.blocked;
+      mergeCountMap(t.geo, sp.geo); mergeCountMap(t.hosts, sp.hosts);
+      for (const [name, b] of sp.bots) {
+        let tb = t.bots.get(name);
+        if (!tb) { tb = newBotAgg(name, 'suspected'); t.bots.set(name, tb); }
+        mergeAgg(tb, b);
+      }
+      if (!t.buckets.length) t.buckets = sp.buckets.slice();
+      else for (let i = 0; i < t.buckets.length; i++) t.buckets[i] += sp.buckets[i] || 0;
+    }
+    for (const [reason, v] of r.suspectedReasons) {
+      const t = out.suspectedReasons.get(reason);
+      // A reason is only excludable if every workspace could filter on it.
+      out.suspectedReasons.set(reason, t
+        ? { total: t.total + v.total, filterable: t.filterable && v.filterable }
+        : { ...v });
     }
     mergeCountMap(out.aiGeo, r.aiGeo);
     mergeCountMap(out.aiNetworks, r.aiNetworks);
@@ -518,7 +623,44 @@ function scaledDistribution(raw, mapByCat, catKeys, n = 12) {
   return [...merged.entries()].map(([k, v]) => ({ key: k, count: Math.round(v) })).sort((a, z) => z.count - a.count).slice(0, n);
 }
 
-function formatBots(raw, { windowStr, scope, hours }) {
+// Fold the suspected-bot reason partitions back into the flat shapes the rest of
+// formatBots reads, keeping only the reasons the caller did not exclude. Returns
+// a shallow clone — `raw` is shared between cached views (see workspaceRaw) and
+// must stay read-only.
+function materialiseSuspected(raw, excluded) {
+  const drop = new Set([...excluded].filter((r) => raw.suspectedReasons.get(r)?.filterable));
+  const bots = new Map([...raw.bots].filter(([, b]) => b.catKey !== 'suspected'));
+  const geo = new Map(); const hosts = new Map();
+  const buckets = new Array(raw.nBuckets).fill(0);
+  let sampled = 0; let blocked = 0; let removedExact = 0;
+
+  for (const [reason, p] of raw.suspectedParts) {
+    if (drop.has(reason)) { removedExact += raw.suspectedReasons.get(reason)?.total || 0; continue; }
+    sampled += p.sampled; blocked += p.blocked;
+    mergeCountMap(geo, p.geo); mergeCountMap(hosts, p.hosts);
+    for (let i = 0; i < buckets.length; i++) buckets[i] += p.buckets[i] || 0;
+    for (const [name, b] of p.bots) {
+      const key = `suspected:${name}`;
+      let t = bots.get(key);
+      if (!t) { t = newBotAgg(name, 'suspected'); bots.set(key, t); }
+      mergeAgg(t, b);
+    }
+  }
+
+  const base = raw.cat.suspected || { total: 0, sampled: 0, blocked: 0 };
+  const geoByCat = new Map(raw.geoByCat); geoByCat.set('suspected', geo);
+  const hostsByCat = new Map(raw.hostsByCat); hostsByCat.set('suspected', hosts);
+  return {
+    ...raw,
+    bots, geoByCat, hostsByCat,
+    cat: { ...raw.cat, suspected: { total: Math.max(0, base.total - removedExact), sampled, blocked } },
+    bucketBots: raw.bucketBots.map((b, i) => ({ ...b, suspected: buckets[i] || 0 })),
+    excludedReasons: [...drop],
+  };
+}
+
+function formatBots(rawIn, { windowStr, scope, hours, exclude = [] }) {
+  const raw = materialiseSuspected(rawIn, new Set(exclude));
   const S = (k, note) => catSummary(raw, k, note);
   const cat = {
     verified: S('verified', 'Confirmed legitimate crawlers'),
@@ -687,7 +829,20 @@ function formatBots(raw, { windowStr, scope, hours }) {
     bad: { total: cat.bad.total, blocked: cat.bad.blocked, truncated: cat.bad.truncated, bots: botsIn(raw, 'badBot').slice(0, 12) },
     scanner: { total: cat.scanner.total, blocked: cat.scanner.blocked, bots: botsIn(raw, 'scanner').slice(0, 10) },
     impostor: { total: cat.impostor.total, bots: botsIn(raw, 'impostor').slice(0, 10) },
-    suspected: { total: cat.suspected.total, bots: botsIn(raw, 'suspected').slice(0, 10) },
+    suspected: {
+      total: cat.suspected.total,
+      bots: botsIn(raw, 'suspected').slice(0, 10),
+      // Detection reasons offered to the exclusion control. `filterable:false`
+      // means the API would not honour a signal: filter for that value, so it is
+      // listed for context but can never be excluded.
+      reasons: [...rawIn.suspectedParts.keys()]
+        .map((reason) => {
+          const info = rawIn.suspectedReasons.get(reason) || { total: 0, filterable: false };
+          return { reason, total: info.total, filterable: !!info.filterable, excluded: raw.excludedReasons.includes(reason) };
+        })
+        .sort((a, z) => z.total - a.total || a.reason.localeCompare(z.reason)),
+      excluded: raw.excludedReasons,
+    },
     allBots: allBots.slice(0, 40),
     newBots,
     trend, geo, hosts,
@@ -720,17 +875,19 @@ function workspaceRaw({ workspace, customerId, hours, windowStr, nowMs }) {
 
 // --- public entry points --------------------------------------------------
 
-export async function buildBots({ workspace, customerId, window: windowStr = '7d' }) {
+// `exclude` is applied at format time only, so the cached raw is shared across
+// every exclusion choice and toggling a reason costs no API calls.
+export async function buildBots({ workspace, customerId, window: windowStr = '7d', exclude = [] }) {
   const hours = WINDOW_HOURS[windowStr] || WINDOW_HOURS['7d'];
   const raw = await workspaceRaw({ workspace, customerId, hours, windowStr, nowMs: minuteNow() });
-  return formatBots(raw, { windowStr, hours, scope: { type: 'workspace', workspaces: raw.workspaces } });
+  return formatBots(raw, { windowStr, hours, exclude, scope: { type: 'workspace', workspaces: raw.workspaces } });
 }
 
-export async function buildBotsAggregate({ workspaces, customerId, window: windowStr = '7d' }) {
+export async function buildBotsAggregate({ workspaces, customerId, window: windowStr = '7d', exclude = [] }) {
   const hours = WINDOW_HOURS[windowStr] || WINDOW_HOURS['7d'];
   const nowMs = minuteNow(); // shared so buckets align across workspaces (and with cached single-workspace raws)
   const raws = [];
   await mapPool(workspaces, 3, async (workspace) => { raws.push(await workspaceRaw({ workspace, customerId, hours, windowStr, nowMs })); });
   const merged = mergeBotRaw(raws);
-  return formatBots(merged, { windowStr, hours, scope: { type: 'all', workspaces } });
+  return formatBots(merged, { windowStr, hours, exclude, scope: { type: 'all', workspaces } });
 }

@@ -194,10 +194,83 @@ NGWAF tags each request. Taxonomy (see the [system-signals doc](https://www.fast
 - **The requests store only retains recent history** — on the demo eCommerce workspace data goes back ~14 days, nothing older (probed 2026-07); that retention, not the query cap, is why **30d was dropped** — a longer period would just return empty older chunks.
 - **Per-request `signals[]`** carries the taxonomy tags AND the bot name in `value` (e.g. `{id:"VERIFIED-BOT.AI-FETCHER", value:"OpenAI SearchBot"}`); `ja3`/`ja4`, `country`, `remote_ip`, `remote_hostname` are all top-level native fields. `fastlyApi.js` maps these back to the old shapes.
 - **Portability — no ASN in the API.** The requests/events endpoints do **not** expose ASN anywhere (checked list + detail + `summation`). ASN only ever lived in the customer-injected `Z-Asn`/`Z-Asn-Name` VCL headers, so the dashboard **must not** depend on them. `networkOf()` in `bots.js` attributes "hosting network" portably from the native **`DATACENTER` signal** value (cloud/hosting provider, ~76% of reqs) with a **reverse-DNS `remote_hostname`** fallback (~77%); residential/ISP IPs are left unattributed. Don't reintroduce `Z-*` header reads.
+- **Suspected-bot detection reasons live in the signal `value`, and `signal:"…"`
+  filtering has two silent failure modes.** NGWAF records *why* a request was
+  called a suspected bot in the `SUSPECTED-BOT` signal's `value` (detector
+  `BotDetectRule`, scope `system`): `Missing header(s)`, `User-Agent: Crawler`,
+  `User-Agent: Common Automation`. These are **not** `.SUBTYPE` tags — there is no
+  `tag:SUSPECTED-BOT.MISSING-HEADERS`; `tag:MISSING-HEADERS` returns 0. AI bots
+  tagged `SUSPECTED-BOT` put their *bot name* in the same field (`ClaudeBot`).
+  Two traps, both of which return a plausible number rather than an error:
+  - **`-signal:"X"` negation is silently dropped** — it returns the identical
+    count to the positive `signal:"X"`, i.e. the exact opposite set. Measured:
+    both forms gave 24,589. (`-tag:` negation *does* work — positive + negative
+    sum to the parent — so it is only `signal:` that is broken.) **Never exclude
+    by negating**; query the reason positively and subtract.
+  - **An unmatched `signal:` filter is silently ignored and returns the ENTIRE
+    parent set.** `signal:"ZZZ-GARBAGE"` and `signal:"ClaudeBot"` both return the
+    full `tag:SUSPECTED-BOT` total with mixed values in `data[]`. So a reason is
+    only trusted once the filter is verified **by content** — read back a sample
+    and require every row to actually carry that value (`countSuspectedReasons`,
+    `REASON_PROBE`). A count-only check ("smaller than the parent") is a heuristic
+    that can pass by luck on a single-reason category, and the totals drift under
+    live traffic anyway since parent and reason are measured seconds apart.
+
+  The reasons **partition** the non-AI suspected traffic — independently verified:
+  `tag:SUSPECTED-BOT -tag:SUSPECTED-BOT.AI-CRAWLER -tag:SUSPECTED-BOT.AI-FETCHER`
+  = 75,893 vs the three reason counts summing to 75,734 (0.21%, live drift). That
+  is what makes subtraction exact rather than an estimate.
 - **Events**: `/events?customer_id=&from=<RFC3339>[&until=]`. `reasons` is an array `[{signal_id,count}]` (normalised to a `{signal:count}` object); `sample_request` mirrors a request record; `source` is the IP. Drives the threat-context `threats`. `get_analytics`/`get_suspicious_ips` were **dropped** (unused by the UI) — `topIPs`/`priority`/`trends` are dormant.
 - **Rate limiting (429)**: the requests API rejects bursts. Mitigations in place — `fastlyApi.js` retries 429/5xx with backoff; `bots.js` runs queries via `mapPool` (bounded concurrency: 5 per workspace, 3 workspaces in the aggregate). Don't fan out unbounded.
 - **AI double-count gotcha**: AI requests are also tagged `VERIFIED-BOT`/`SUSPECTED-BOT`, so the trend-bucket bumping skips AI in the verified/suspected buckets (they're counted by the AI jobs). Preserve this if you touch `fetchWorkspaceBots`.
 - **Node has no `timeout` builtin on macOS zsh** — don't use it in test one-liners.
+
+### Suspected-bot reason exclusions (the "Exclusions" control)
+
+A single false-positive-prone detection reason can dominate the suspected-bot
+category — on the demo eCommerce workspace `Missing header(s)` alone is ~30% of
+all suspected-bot volume, and excluding it drops `Google-Read-Aloud` and
+`Googlebot` out of the suspected list entirely. The top-bar **Exclusions** menu
+(a native `<details>`, the only popup here, so it needs no dismissal JS) lets an
+operator drop one reason from the entire report.
+
+The load-bearing design decision: **the exclusion is applied at format time, not
+fetch time.**
+
+- `fetchWorkspaceBots` always fetches *everything* and stores the suspected sample
+  **partitioned by reason** (`raw.suspectedParts`), plus each reason's exact total
+  (`raw.suspectedReasons`, from `countSuspectedReasons`).
+- `materialiseSuspected(raw, excluded)` folds the kept partitions back into the
+  flat shapes the rest of `formatBots` already reads (`cat.suspected`, the
+  `suspected:*` entries of `raw.bots`, `geoByCat`/`hostsByCat`, `bucketBots[i]
+  .suspected`). **Everything downstream was left untouched** — KPIs, trend,
+  taxonomy, tables and the PDF all recompute for free.
+- It returns a **shallow clone**; `raw` is shared between cached views (see
+  `workspaceRaw`) and must stay read-only. Keep it that way.
+
+Consequences worth preserving:
+
+- `rawCache` stays keyed `<cust>:<ws>:<window>` with **no exclusion in the key**,
+  so every exclusion combination shares one fetch. Toggling a reason within the
+  60s raw TTL costs **no API calls** (measured 1.4 ms); outside the TTL it is a
+  normal cold load. Only `server.js`'s *formatted* cache key carries the
+  exclusion set (sorted, so any order reuses one entry).
+- Exclusion subtracts the reason's **exact** count, so headline numbers stay exact
+  — the user's explicit priority is accuracy over report-generation speed. Per-bot
+  rows inside the category remain sampled-and-scaled as before (the scale factor
+  recomputes from the kept partitions, so it stays consistent).
+- Reasons are passed as a **repeated** `?exclude=` param, not comma-separated —
+  the values contain commas and colons.
+- `refresh()` **prunes** any persisted reason the current window/workspace cannot
+  filter on, so a stale `localStorage` entry can never silently claim to filter.
+- The PDF cover gains an "Excluded" row and a summary sentence — a filtered report
+  must say so on its face.
+
+Cost: 1 extra count query per discovered reason (×2 on 14d, chunked), run in a
+bounded `mapPool(…, 5)` *after* the main pool. Roughly +1–5s on a cold load,
+which is inside the baseline's own run-to-run variance on this API (baseline
+measured 14–22s for a cold 7d, not the 8s this file used to quote). Raising that
+concurrency to 6 made it *worse* (rate limiting), so leave it at 5.
 
 ## Performance
 
@@ -279,6 +352,18 @@ sample counts scaled by one overall AI factor (`fAI`) — estimates.
   post-push scrub leaves the old commit fetchable by SHA, the repo was **deleted and recreated**
   to guarantee a clean public history. See the new "GitHub repository & releases" section for the
   repo layout, the no-secrets-in-commits rule, and the release recipe.
+
+**This session (2026-09-15):**
+- **Suspected-bot reason exclusions** — the Exclusions control described above,
+  spanning `bots.js` (reason partitioning, exact per-reason counts, the
+  content-verified filterability probe, `materialiseSuspected`), `server.js`
+  (repeated `?exclude=` param + cache key), `public/app.js` (menu, persistence,
+  status line, PDF cover) and `public/styles.css` (the `.menu-*` rules).
+- Found and documented two silent `signal:` filtering failure modes in the
+  requests API — see the constraints section. Both would have produced confidently
+  wrong numbers; the content check is what makes the feature trustworthy.
+- `resetFilters` was **hoisted out of `init()`** to module scope so the exclusions
+  menu can call it; it was previously a `const` local to `init`.
 
 Open ideas the user may pick up:
 - Make the per-bucket bot split exact (currently sampled+scaled) via per-bucket verdict count queries — costs latency.

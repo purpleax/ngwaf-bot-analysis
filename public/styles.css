@@ -362,3 +362,47 @@ tr.clickrow .arrow { color: var(--accent); }
     color: var(--muted); font-size: 10px; letter-spacing: .03em;
     border-top: 2px solid var(--brand); padding-top: 4px; }
 }
+
+/* exclusions dropdown — a native <details> so it needs no dismissal JS */
+.exclude-ctl { position: relative; justify-content: flex-end; }
+.exclude-ctl > summary {
+  list-style: none; cursor: pointer; user-select: none;
+  text-transform: none; letter-spacing: normal; font-size: 13px;
+}
+.exclude-ctl > summary::-webkit-details-marker { display: none; }
+.exclude-ctl > summary::after { content: ' ▾'; color: var(--muted); }
+.exclude-ctl > summary.active { border-color: var(--brand); color: var(--brand-ink); }
+.exclude-ctl[open] > summary { border-color: var(--brand); }
+.menu-panel {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
+  min-width: 340px; max-width: 460px; padding: 8px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--shadow);
+  text-transform: none; letter-spacing: normal; color: var(--text); text-align: left;
+}
+.menu-head {
+  font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 4px 6px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px;
+}
+.menu-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px; border-radius: 6px;
+  font-size: 13px; cursor: pointer;
+}
+.menu-row:hover { background: var(--panel-2); }
+.menu-row.is-disabled { cursor: default; opacity: 0.55; }
+.menu-row.is-disabled:hover { background: transparent; }
+.menu-label { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.menu-count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+.menu-note {
+  font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;
+  border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; white-space: nowrap;
+}
+.menu-foot {
+  display: flex; align-items: center; gap: 8px; justify-content: space-between;
+  padding: 8px 6px 2px; margin-top: 4px; border-top: 1px solid var(--border);
+}
+.menu-hint { font-size: 11px; color: var(--muted); }
+.menu-empty { padding: 10px 6px; font-size: 12px; color: var(--muted); }
+.btn.small { padding: 4px 8px; font-size: 12px; }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn:disabled:hover { border-color: var(--border); }

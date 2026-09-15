@@ -147,14 +147,20 @@ app.get('/api/bots', async (req, res) => {
   if (!customerId) return res.status(400).json({ error: 'customer_id is required' });
   const workspace = req.query.workspace || DEFAULT_WORKSPACE;
   const window = ['24h', '7d', '14d'].includes(req.query.window) ? req.query.window : '7d';
+  // Suspected-bot detection reasons to leave out of the report, passed as a
+  // repeated param (?exclude=Missing+header(s)&exclude=...) because the values
+  // themselves contain commas and colons. Sorted into the cache key so the same
+  // set in any order reuses one entry; the underlying raw is shared regardless.
+  const exclude = [].concat(req.query.exclude || []).map((r) => String(r).trim()).filter(Boolean).sort();
+  const ex = exclude.length ? `:x=${exclude.join('|')}` : '';
   try {
     if (workspace === '__all__') {
-      const key = `bots:${customerId}:__all__:${window}`;
-      const data = await cached(key, async () => buildBotsAggregate({ workspaces: await listWorkspaceNames(customerId), customerId, window }));
+      const key = `bots:${customerId}:__all__:${window}${ex}`;
+      const data = await cached(key, async () => buildBotsAggregate({ workspaces: await listWorkspaceNames(customerId), customerId, window, exclude }));
       return res.json(data);
     }
-    const key = `bots:${customerId}:${workspace}:${window}`;
-    const data = await cached(key, () => buildBots({ workspace, customerId, window }));
+    const key = `bots:${customerId}:${workspace}:${window}${ex}`;
+    const data = await cached(key, () => buildBots({ workspace, customerId, window, exclude }));
     res.json(data);
   } catch (err) {
     res.status(502).json({ error: String(err.message || err) });
