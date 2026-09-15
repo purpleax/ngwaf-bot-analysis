@@ -1,6 +1,6 @@
 {
   "name": "ngwaf-bot-analysis",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Web dashboard for Fastly Next-Gen WAF bot visibility & traffic analysis, backed by the Fastly unified API",
   "type": "module",
   "main": "server.js",

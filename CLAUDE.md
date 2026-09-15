@@ -106,9 +106,10 @@ runs on a Mac **without Node installed** (script: `scripts/build-sea.sh`, config
      ```
   4. Release notes MUST tell users to (a) supply their own `.env` and (b) clear the Gatekeeper
      quarantine (`xattr -d com.apple.quarantine <file>`) — the binary is ad-hoc signed.
-- **Current release:** `v2.0.0` (tag at the initial commit) with asset
-  `ngwaf-dashboard-macos-arm64` (137 MB, Apple Silicon / arm64 only — Intel Macs need a separate
-  x64 build uploaded as a second asset).
+- **Current release:** `v2.1.0` (suspected-bot reason exclusions) with asset
+  `ngwaf-dashboard-macos-arm64` (138 MB). **Apple Silicon / arm64 only, by decision** — the
+  user confirmed (2026-09) that no Intel/x64 build is wanted, so don't add one or caveat its
+  absence; `build-sea.sh` still derives the arch from `uname -m` if that ever changes.
 
 ## Architecture
 
