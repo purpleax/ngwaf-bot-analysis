@@ -1,4 +1,4 @@
-# CLAUDE.md — NGWAF Bot Analysis (developer / continuation notes)
+# AGENTS.md — NGWAF Bot Analysis (developer / continuation notes)
 
 Context for continuing work on this project. User-facing docs live in
 [README.md](README.md); this file is the engineering handoff.
