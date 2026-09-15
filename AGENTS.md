@@ -106,6 +106,11 @@ runs on a Mac **without Node installed** (script: `scripts/build-sea.sh`, config
      ```
   4. Release notes MUST tell users to (a) supply their own `.env` and (b) clear the Gatekeeper
      quarantine (`xattr -d com.apple.quarantine <file>`) — the binary is ad-hoc signed.
+- **Keep only the latest release.** The user's standing preference (2026-09): when cutting a
+  new release, delete the previous one (`gh release delete vX.Y.Z -R purpleax/ngwaf-bot-analysis
+  --yes`) so exactly one downloadable binary exists. **Keep the git tag** — deleting the release
+  removes the asset while the tag still marks the commit, so `git checkout vX.Y.Z` keeps working.
+  (`--cleanup-tag` would remove the tag too; don't, unless asked.)
 - **Current release:** `v2.1.0` (suspected-bot reason exclusions) with asset
   `ngwaf-dashboard-macos-arm64` (138 MB). **Apple Silicon / arm64 only, by decision** — the
   user confirmed (2026-09) that no Intel/x64 build is wanted, so don't add one or caveat its
