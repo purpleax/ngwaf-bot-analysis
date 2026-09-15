@@ -58,7 +58,12 @@ runs on a Mac **without Node installed** (script: `scripts/build-sea.sh`, config
   the user lands on the existing instance, then exits.
 - **Build gotchas (hard-won):** Homebrew's `node` is a *shared* build (links `libnode.dylib`)
   with **no SEA fuse** → injection fails; the script downloads the **official nodejs.org**
-  release binary and injects into that. The postject **sentinel fuse differs by build**, so
+  release binary and injects into that. That official runtime is also used to **generate the
+  blob** (`--experimental-sea-config`), not just as the injection target — a shared build
+  fails that step too, with `Single executable application is disabled`. The build broke
+  exactly this way (2026-09) once Homebrew moved node to a version whose shared build ran the
+  blob step; fetching the runtime was reordered *before* blob generation to fix it. `NODE_VER`
+  tracks `node -v`, so a Homebrew upgrade means a fresh runtime download on the next build. The postject **sentinel fuse differs by build**, so
   it's grepped from the runtime binary, not hardcoded. The copied node is mode `555` → `chmod
   u+w` before postject. Needs network (esbuild/postject via `npx`, + the node tarball, cached in `build/`).
 - **Gatekeeper**: ad-hoc signed, so other Macs quarantine it on download — `xattr -d
@@ -364,6 +369,12 @@ sample counts scaled by one overall AI factor (`fAI`) — estimates.
   wrong numbers; the content check is what makes the feature trustworthy.
 - `resetFilters` was **hoisted out of `init()`** to module scope so the exclusions
   menu can call it; it was previously a `const` local to `init`.
+- **Fixed `scripts/build-sea.sh`** — it had been generating the SEA blob with the
+  *system* node, which stopped working when Homebrew's node moved to v26.7.0 (a
+  shared build reports `Single executable application is disabled`). Steps 2 and 3
+  are now swapped so the official runtime is fetched first and used for the blob.
+  Rebuilt and verified standalone: correct build stamp, no token embedded,
+  exclusions working against the live API.
 
 Open ideas the user may pick up:
 - Make the per-bucket bot split exact (currently sampled+scaled) via per-bucket verdict count queries — costs latency.

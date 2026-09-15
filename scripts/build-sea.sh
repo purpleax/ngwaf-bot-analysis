@@ -19,12 +19,11 @@ npx --yes esbuild server.js --bundle --platform=node --format=cjs \
   --target=node18 --log-override:empty-import-meta=silent \
   --define:__BUILD_STAMP__="\"$STAMP\"" --outfile=build/app.cjs
 
-echo "2/5  generating the SEA blob (embeds public/ assets)…"
-node --experimental-sea-config sea-config.json
-
-echo "3/5  fetching the official Node runtime (self-contained, has the SEA fuse)…"
-# Homebrew/managed node is often a *shared* build (links libnode.dylib) with no
-# SEA fuse, so injection fails. Use the official nodejs.org release binary instead.
+echo "2/5  fetching the official Node runtime (self-contained, has the SEA fuse)…"
+# Homebrew/managed node is often a *shared* build (links libnode.dylib). Such a
+# build has no SEA fuse, so injection fails — AND it reports "Single executable
+# application is disabled" for --experimental-sea-config, so it cannot even make
+# the blob. Fetch the official nodejs.org release first and use it for BOTH steps.
 NODE_VER="$(node -v)"                 # e.g. v26.3.0
 case "$(uname -m)" in
   arm64)  NARCH="arm64" ;;
@@ -37,6 +36,9 @@ if [ ! -f "$RUNTIME" ]; then
   curl -fsSL "https://nodejs.org/dist/${NODE_VER}/${DIST}.tar.gz" -o "build/${DIST}.tar.gz"
   tar -xzf "build/${DIST}.tar.gz" -C build
 fi
+
+echo "3/5  generating the SEA blob (embeds public/ assets)…"
+"$RUNTIME" --experimental-sea-config sea-config.json
 cp "$RUNTIME" "build/$NAME"
 chmod u+w "build/$NAME"   # node ships mode 555; postject needs write access
 
